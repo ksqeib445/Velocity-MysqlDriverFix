@@ -3,155 +3,111 @@ package fun.ksnb.hllb.velocity.main;
 import com.google.inject.Inject;
 import com.velocitypowered.api.plugin.annotation.DataDirectory;
 import com.velocitypowered.api.proxy.ProxyServer;
+import fun.ksnb.hllb.velocity.task.FileDownloadTask;
+import fun.ksnb.hllb.velocity.util.ReflectUtil;
 import org.slf4j.Logger;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodHandles;
-import java.lang.reflect.Field;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
-import java.net.HttpURLConnection;
-import java.net.URL;
+import java.io.FileInputStream;
+import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Arrays;
+import java.security.MessageDigest;
 
 public class VelocityFixLuobo {
-    private MethodHandles.Lookup super_lookup;
+    private static final String MYSQL_VERSION = "8.0.30";
+    private static final String MYSQL_SHA256 = "b5bf2f0987197c30adf74a9e419b89cda4c257da2d1142871f508416d5f2227a";
+    private final ProxyServer server;
+    private final Logger logger;
+    private final Path dataDirectory;
 
     @Inject
-    public VelocityFixLuobo(ProxyServer server, Logger logger, @DataDirectory Path dataDirectory) {
-        File dataFile = dataDirectory.toFile();
-        if (!dataFile.exists()) {
-            dataFile.mkdirs();
+    public VelocityFixLuobo(ProxyServer server, Logger logger, @DataDirectory Path dataDirectory) throws Exception {
+        this.server = server;
+        this.logger = logger;
+        this.dataDirectory = dataDirectory;
+
+        if (ReflectUtil.getClass("com.mysql.cj.jdbc.Driver") != null) {
+            logger.info("服务端已自带 MySQL 依赖，植入终止！");
+            return;
         }
-        String version = "8.0.25";
-        String jarName = "mysql-connector-java-" + version + ".jar";
-        try {
-            if (getClass("com.mysql.cj.jdbc.Driver") != null) return;
-            downloadFile("https://maven.aliyun.com/repository/public/mysql/mysql-connector-java/" + version + "/mysql-connector-java-" + version + ".jar", new File(dataFile, jarName));
-        } catch (Exception e) {
-            e.printStackTrace();
-            logger.error("MySql 驱动 贺兰大萝卜库 下载失败");
+        if (!Files.exists(dataDirectory)) {
+            Files.createDirectories(dataDirectory);
         }
-//        反射入
-        try {
-            init();
-        } catch (Exception e) {
-            e.printStackTrace();
-            logger.error("MySql 驱动 贺兰大萝卜库 反射加载失败");
+        if (loadCache()) {
+            return;
         }
-        try {
-            ClassLoader classLoader = this.getClass().getClassLoader();
-            MethodHandle handle = super_lookup.unreflect(getMethodWithParent(classLoader.getClass(), "addURL", false, URL.class));
-            handle.invoke(classLoader, new File(dataFile, jarName).toURI().toURL());
-        } catch (Throwable e) {
-            e.printStackTrace();
-            logger.error("MySql 驱动 贺兰大萝卜库 反射加载失败");
-        }
-        if (getClass("com.mysql.cj.jdbc.Driver") == null) {
-            logger.error("MySql 驱动 贺兰大萝卜库 反射加载失败");
-        } else {
-            logger.info("MySql 驱动 贺兰大萝卜库 加载成功");
-        }
+        downloadAndLoad();
     }
 
-    public static Method getMethodWithParent(Class<?> clazz, String name, boolean handleAccessible, Class<?>... args) throws NoSuchMethodException {
-        for (Method method : clazz.getDeclaredMethods()) {
-            if (!method.getName().equalsIgnoreCase(name)) continue;
-            if (!Arrays.equals(method.getParameterTypes(), args)) continue;
-            if (handleAccessible) method.setAccessible(true);
-            return method;
-        }
-        if (clazz != Object.class)
-            return getMethodWithParent(clazz.getSuperclass(), name, handleAccessible, args);
-        throw new NoSuchMethodException(name + " method in " + clazz.getName());
+    private String getMySQLLibraryName() {
+        return "mysql-connector-java-" + MYSQL_VERSION + ".jar";
     }
 
-    private Class<?> getClass(String name) {
-        try {
-            return Class.forName(name);
-        } catch (Exception e) {
-            return null;
-        }
+    private File getMySQLLiraryFile() {
+        return new File(dataDirectory.toFile(), getMySQLLibraryName());
     }
 
-    private void init() throws ClassNotFoundException, IllegalAccessException, InvocationTargetException, NoSuchFieldException, NoSuchMethodException {
-        Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
-        Field theUnsafeField = getField(unsafeClass, unsafeClass, true);
-        Method theUnsafeGetObjectMethod = getMethod(unsafeClass, "getObject", false, Object.class, long.class);
-        Method theUnsafeStaticFieldOffsetMethod = getMethod(unsafeClass, "staticFieldOffset", false, Field.class);
-        Object theUnsafe = theUnsafeField.get(null);
-        Field implLookup = getField(MethodHandles.Lookup.class, "IMPL_LOOKUP", false);
-
-        super_lookup = (MethodHandles.Lookup) theUnsafeGetObjectMethod.invoke(theUnsafe, MethodHandles.Lookup.class, theUnsafeStaticFieldOffsetMethod.invoke(theUnsafe, implLookup));
+    private String getMySQLDownloadUrl() {
+        return "https://maven.aliyun.com/repository/public/mysql/mysql-connector-java/"
+                .concat(MYSQL_VERSION)
+                .concat("/")
+                .concat(getMySQLLibraryName());
     }
 
-    public static Field getField(Class<?> clazz, String target, boolean handleAccessible) throws NoSuchFieldException {
-        try {
-            Field field;
-            field = clazz.getDeclaredField(target);
-            if (handleAccessible) field.setAccessible(true);
-            return field;
-        } catch (NoSuchFieldException e) {
-            throw new NoSuchFieldException(target + " field in " + clazz.getName());
-        }
-    }
-
-    public static Field getField(Class<?> clazz, Class<?> target, boolean handleAccessible) throws NoSuchFieldException {
-        return getField0(clazz, clazz, target, handleAccessible);
-    }
-
-    private static Field getField0(Class<?> source, Class<?> clazz, Class<?> target, boolean handleAccessible) throws NoSuchFieldException {
-        for (Field field : clazz.getDeclaredFields()) {
-            if (field.getType() != target) continue;
-            if (handleAccessible) field.setAccessible(true);
-            return field;
-        }
-        clazz = clazz.getSuperclass();
-        if (clazz != null) return getField(clazz, target, handleAccessible);
-        throw new NoSuchFieldException(target.getName() + " type in " + source.getName());
-    }
-
-    public static Method getMethod(Class<?> clazz, String name, boolean handleAccessible, Class<?>... args) throws NoSuchMethodException {
-        for (Method method : clazz.getDeclaredMethods()) {
-            if (!method.getName().equalsIgnoreCase(name)) continue;
-            if (!Arrays.equals(method.getParameterTypes(), args)) continue;
-            if (handleAccessible) method.setAccessible(true);
-            return method;
-        }
-        throw new NoSuchMethodException(name + " method in " + clazz.getName());
-    }
-
-    private void downloadFile(String url, File out) throws IOException {
-        if (out.exists()) out.delete();
-        File downloadingFile = new File(out.getParent(), out.getName() + ".downloading");
-        if (downloadingFile.exists()) {
-            downloadingFile.delete();
-        }
-        downloadingFile.createNewFile();
-
-        HttpURLConnection httpURLConnection = (HttpURLConnection) new URL(url).openConnection();
-        httpURLConnection.setDoInput(true);
-        httpURLConnection.setDoOutput(false);
-        httpURLConnection.connect();
-
-        int repCode = httpURLConnection.getResponseCode();
-
-        if (repCode == 200) {
-            try (InputStream inputStream = httpURLConnection.getInputStream();
-                 FileOutputStream fileOutputStream = new FileOutputStream(downloadingFile)) {
-                byte[] b = new byte[1024];
-                int n;
-                while ((n = inputStream.read(b)) != -1) {
-                    fileOutputStream.write(b, 0, n);// 写入数据
+    public boolean loadCache() throws Exception {
+        File libraryFile = getMySQLLiraryFile();
+        if (libraryFile.exists()) {
+            if (getSha256(libraryFile).equals(MYSQL_SHA256)) {
+                logger.info("缓存文件校验成功，正在植入...");
+                try {
+                    ReflectUtil.addFileLibrary(libraryFile);
+                } catch (Throwable e) {
+                    logger.error("在尝试植入依赖时出现异常", e);
                 }
-                fileOutputStream.flush();
+                logger.info("MySql 驱动 贺兰大萝卜库 植入成功");
+                return true;
             }
-            downloadingFile.renameTo(out);
+            logger.warn("缓存的 MySQL 依赖 Sha256 检查不通过，将重新下载！");
+        }
+        return false;
+    }
+
+    public void downloadAndLoad() throws Exception {
+        logger.info("正在下载: " + getMySQLLibraryName());
+        File libraryFile = getMySQLLiraryFile();
+        Path path = new FileDownloadTask(getMySQLDownloadUrl(), libraryFile.toPath()).call();
+        if (!getSha256(path.toFile()).equals(MYSQL_SHA256)) {
+            throw new RuntimeException("下载的新文件没有通过 Sha256 校验，请排查！");
+        }
+        logger.info("依赖下载成功，正在植入...");
+        try {
+            ReflectUtil.addFileLibrary(libraryFile);
+        } catch (Throwable e) {
+            logger.error("在尝试植入依赖时出现异常", e);
+        }
+        logger.info("MySql 驱动 贺兰大萝卜库 植入成功");
+    }
+
+    // 获得文件sha256
+    private String getSha256(File file) throws Exception {
+        try (FileInputStream fis = new FileInputStream(file);
+             ByteArrayOutputStream baos = new ByteArrayOutputStream();) {
+            byte[] buff = new byte[1024];
+            int n;
+            while ((n = fis.read(buff)) > 0) {
+                baos.write(buff, 0, n);
+            }
+            final byte[] digest = MessageDigest.getInstance("SHA-256").digest(baos.toByteArray());
+            StringBuilder sb = new StringBuilder();
+            for (byte aByte : digest) {
+                String temp = Integer.toHexString((aByte & 0xFF));
+                if (temp.length() == 1) {
+                    sb.append("0");
+                }
+                sb.append(temp);
+            }
+            return sb.toString();
         }
     }
 }
